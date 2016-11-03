@@ -81,3 +81,10 @@ properties:
   syslog.queue_checkpoint_interval:
     description: write bookkeeping information on checkpoints (every n records)
     default: 100
+
+  syslog.log_template:
+    description: |
+        Syslog log template to use when sending the messages:
+        - default: Original syslog-release format: 'deployment/jobname/job_id'
+        - metron_agent: compatible with loggregator/metron_agent format '[job=foo index=0]'
+    default: "default"
