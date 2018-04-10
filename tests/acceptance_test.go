@@ -3,10 +3,9 @@ package syslog_acceptance_test
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"strconv"
 
-	"github.com/jtarchie/syslog/pkg/log"
+	logrfc "github.com/jtarchie/syslog/pkg/log"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
@@ -28,13 +27,15 @@ var _ = Describe("Impact on the local VM", func() {
 			Eventually(restartsession).Should(gexec.Exit(0))
 		})
 
-		It("Cleans up any file at the old config file location", func() {
-			session := ForwarderSshCmd("stat /etc/rsyslog.d/rsyslog.conf")
+		It("Cleans up any files at old config file locations", func() {
+			session := ForwarderSshCmd("stat /etc/rsyslog.d/rsyslog.conf || stat /etc/rsyslog.d/30-syslog-release.conf || stat /etc/rsyslog.d/20-syslog-release-custom-rules.conf")
 			Eventually(session).Should(gbytes.Say("stat: cannot stat ‘/etc/rsyslog.d/rsyslog.conf’: No such file or directory"))
+			Eventually(session).Should(gbytes.Say("stat: cannot stat ‘/etc/rsyslog.d/30-syslog-release.conf’: No such file or directory"))
+			Eventually(session).Should(gbytes.Say("stat: cannot stat ‘/etc/rsyslog.d/20-syslog-release-custom-rules.conf’: No such file or directory"))
 		})
 	})
 
-	PContext("When processing logs from blackbox", func() {
+	Context("When processing logs from blackbox", func() {
 		BeforeEach(func() {
 			Cleanup()
 			Deploy("manifests/udp-blackbox.yml")
@@ -59,9 +60,9 @@ var _ = Describe("Impact on the local VM", func() {
 		It("doesn't write them to the logfiles specified in the stemcell config", func() {
 
 			By("waiting for logs to be forwarded")
-			Eventually(func() *gexec.Session {
-				return ForwarderLog()
-			}).Should(gbytes.Say("test-logger-isolation"))
+			Eventually(func() string {
+				return ForwardedLogs()
+			}).Should(ContainSubstring("test-logger-isolation"))
 
 			By("checking that the logs don't appear in local logfiles")
 			Expect(DefaultLogfiles()).NotTo(gbytes.Say("test-logger-isolation"))
@@ -73,25 +74,12 @@ var _ = Describe("Forwarding loglines to a TCP syslog drain", func() {
 	TestSharedBehavior := func() {
 		Context("When messages are written to UDP with logger", func() {
 			It("receives messages in rfc5424 format on the configured drain", func() {
-
-				type LogOutput struct {
-					Tables []struct {
-						Rows []struct {
-							Stdout string
-						}
-					}
-				}
-
 				SendLogMessage("test-rfc5424")
-				Eventually(func() *gexec.Session {
-					return ForwarderLog()
-				}).Should(gbytes.Say("test-rfc5424"))
+				Eventually(func() string {
+					return ForwardedLogs()
+				}).Should(ContainSubstring("test-rfc5424"))
 
-				output := LogOutput{}
-				err := json.Unmarshal(ForwarderLog().Out.Contents(), &output)
-				Expect(err).ToNot(HaveOccurred())
-
-				logs := bytes.NewBufferString(output.Tables[0].Rows[0].Stdout)
+				logs := bytes.NewBufferString(ForwardedLogs())
 				reader := bufio.NewReader(logs)
 
 				for {
@@ -100,7 +88,7 @@ var _ = Describe("Forwarding loglines to a TCP syslog drain", func() {
 					if len(line) == 0 {
 						break
 					}
-					logLine, err := syslog.Parse(line)
+					logLine, err := logrfc.Parse(line)
 					Expect(err).ToNot(HaveOccurred())
 					if string(logLine.Message()) == "test-rfc5424" {
 						sdata := logLine.StructureData()
@@ -113,9 +101,9 @@ var _ = Describe("Forwarding loglines to a TCP syslog drain", func() {
 			It("receives messages over 1k long on the configured drain", func() {
 				message := counterString(1025, "A")
 				SendLogMessage(message)
-				Eventually(func() *gexec.Session {
-					return ForwarderLog()
-				}).Should(gbytes.Say(message))
+				Eventually(func() string {
+					return ForwardedLogs()
+				}).Should(ContainSubstring(message))
 			})
 		})
 
@@ -128,6 +116,11 @@ var _ = Describe("Forwarding loglines to a TCP syslog drain", func() {
 			It("forwards new lines written to the file through syslog", func() {
 				Eventually(WriteToTestFile("test-blackbox-forwarding")).Should(gbytes.Say("test-blackbox-forwarding"))
 			})
+		})
+
+		It("has a valid config", func() {
+			session := ForwarderSshCmd("sudo rsyslogd -N1")
+			Eventually(session).Should(gexec.Exit(0))
 		})
 	}
 
@@ -157,6 +150,103 @@ var _ = Describe("Forwarding loglines to a TCP syslog drain", func() {
 			message := counterString(1025, "A")
 
 			Eventually(WriteToTestFile(message)).Should(gbytes.Say(message))
+		})
+	})
+
+	Context("when file forwarding is configured with bad rules", func() {
+		BeforeEach(func() {
+			Cleanup()
+			Deploy("manifests/broken-rules.yml")
+		})
+		AfterEach(func() {
+			Cleanup()
+		})
+
+		TestSharedBehavior()
+	})
+
+	Context("when file forwarding is configured with good rules", func() {
+		BeforeEach(func() {
+			Cleanup()
+			Deploy("manifests/good-rules.yml")
+		})
+		AfterEach(func() {
+			Cleanup()
+		})
+
+		It("filters out messages that match the rule", func() {
+			message := "This is a DEBUG message that we filter out"
+			SendLogMessage(message)
+			Consistently(func() string {
+				return ForwardedLogs()
+			}).ShouldNot(ContainSubstring(message))
+		})
+
+		TestSharedBehavior()
+	})
+
+	Context("when TLS is configured", func() {
+		BeforeEach(func() {
+			Cleanup()
+			DeployWithVarsStore("manifests/tls-forwarding.yml")
+		})
+		AfterEach(func() {
+			Cleanup()
+		})
+
+		TestSharedBehavior()
+	})
+})
+
+var _ = Describe("When syslog is configured to run in unprivileged mode", func() {
+	BeforeEach(func() {
+		Cleanup()
+		Deploy("manifests/blackbox-unpriv.yml")
+	})
+	AfterEach(func() {
+		Cleanup()
+	})
+
+	It("forwards normal log lines", func() {
+		messagegenerator := "{1..10}"
+		message := "1 2 3 4 5 6 7 8 9 10"
+		Eventually(WriteToTestFile(messagegenerator)).Should(gbytes.Say(message))
+	})
+
+	It("does not forward logs not visable to syslog user", func() {
+		//we can't use a literal message or we'll get false matches from the command which created the log line
+		messagegenerator := "{1..10}"
+		message := "1 2 3 4 5 6 7 8 9 10"
+		Consistently(WriteToPrivateTestFile(messagegenerator)).ShouldNot(gbytes.Say(message))
+	})
+})
+
+var _ = Describe("When syslog is disabled", func() {
+	Context("when the storer is configured to accept logs", func() {
+		BeforeEach(func() {
+			Cleanup()
+			Deploy("manifests/disabled.yml")
+		})
+
+		It("does not forward logs", func() {
+			SendLogMessage("test-logger-isolation")
+			Consistently(func() string {
+				return ForwardedLogs()
+			}).Should(HaveLen(0))
+		})
+
+		It("doesn't start blackbox", func() {
+			Expect(ForwarderMonitSummary()).ToNot(ContainSubstring("blackbox"))
+		})
+	})
+
+	Context("when there is not configuration provided via links or properties", func() {
+		BeforeEach(func() {
+			Cleanup()
+		})
+
+		It("starts successfully", func() {
+			Deploy("manifests/disabled-no-config.yml")
 		})
 	})
 })

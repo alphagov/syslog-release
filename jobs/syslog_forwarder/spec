@@ -4,6 +4,10 @@ name: syslog_forwarder
 templates:
   pre-start.erb: bin/pre-start
   syslog-release.conf.erb: config/syslog-release.conf
+  syslog-release-custom-rules.conf.erb: config/syslog-release-custom-rules.conf
+  syslog-release-forwarding-rules.conf.erb: config/syslog-release-forwarding-rules.conf
+  syslog-release-forwarding-setup.conf.erb: config/syslog-release-forwarding-setup.conf
+  syslog-release-file-exclusion.conf.erb: config/syslog-release-file-exclusion.conf
   ca_cert.pem.erb: config/ca_cert.pem
   blackbox_ctl.erb: bin/blackbox_ctl
   blackbox_config.yml.erb: config/blackbox_config.yml
@@ -24,6 +28,15 @@ properties:
   syslog.forward_files:
     description: If enabled, use BlackBox to forward logs.
     default: true
+  syslog.respect_file_permissions:
+    description: |
+      If enabled, log files will be forwarded if and only if
+      they satisfy any of the following:
+      - world-readable
+      - readable by the syslog user
+      - readable by the vcap group
+        (note: the vcap user is insufficient, it must be the group.)
+    default: false
   syslog.use_tcp_for_file_forwarding_local_transport:
     description: >
       If enabled, Blackbox will use TCP rather than UDP
@@ -63,8 +76,10 @@ properties:
     description: Set this to true to enable TLS.
     default: false
   syslog.permitted_peer:
-    description: Accepted fingerprint (SHA1) or name of remote peer. Required if TLS is enabled.
-    default: ""
+    description: >
+      Accepted fingerprint (SHA1) or name of remote peer.
+      Only used if TLS is enabled.
+      If not specified, will use the configured forwarding address.
     example: "*.papertrail.com"
   syslog.ca_cert:
     description: |
@@ -120,3 +135,14 @@ properties:
   syslog.blackbox.limit_cpu:
     description: limit goprocess to a single cpu via gomaxprocs
     default: true
+
+  syslog.migration.disabled:
+    default: false
+    description: |
+      Deprecated.
+      Allows systems that cannot modify their deployment toplogy
+      to use this release.
+      Do not use if you're not already relying on this capability.
+      If true, does not forward syslogs,
+      and does not require any other properties be provided.
+      Overrides all other configuration.
